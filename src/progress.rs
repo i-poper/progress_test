@@ -51,14 +51,6 @@ impl<T> Progress<T> {
         Progress { inner }
     }
 
-    pub async fn set_total(&mut self, total: u64) {
-        self.inner.lock().await.total = total;
-    }
-
-    pub async fn cancel(&mut self) {
-        self.inner.lock().await.canceled = true
-    }
-
     pub async fn to_item(&self, id: impl ToString) -> Item {
         let pg = self.inner.lock().await;
         Item {

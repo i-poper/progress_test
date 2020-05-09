@@ -3,10 +3,8 @@ mod progress;
 
 use futures::stream::TryStreamExt;
 use tokio::io::{self, BufReader, BufWriter};
-use tokio::prelude::*;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-use item::Item;
 use progress::Progress;
 
 #[tokio::main]
@@ -18,7 +16,7 @@ async fn main() {
         let url = "https://releases.ubuntu.com/20.04/ubuntu-20.04-desktop-amd64.iso";
         let res = reqwest::get(url).await.unwrap();
 
-        let mut stream = res
+        let stream = res
             .bytes_stream()
             .map_err(|e| futures::io::Error::new(futures::io::ErrorKind::Other, e))
             .into_async_read()
