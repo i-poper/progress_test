@@ -1,12 +1,10 @@
-use futures::future::FutureExt;
 use std::fmt;
 use std::io::SeekFrom;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Poll, Context};
-use tokio::io::{AsyncSeek, Result, ErrorKind};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncSeek, ErrorKind, Result};
 use tokio::prelude::*;
-use tokio::sync::Mutex;
+use tokio::sync::watch::Sender;
 
 use crate::item::Item;
 
@@ -30,137 +28,72 @@ impl<T> fmt::Debug for ProgressInner<T> {
 }
 
 pub struct Progress<T> {
-    inner: Arc<Mutex<ProgressInner<T>>>,
-}
-
-impl<T> std::clone::Clone for Progress<T> {
-    fn clone(&self) -> Self {
-        Progress { inner: self.inner.clone() }
-    }
+    inner: ProgressInner<T>,
+    tx: Sender<Item>,
 }
 
 impl<T> Progress<T> {
-    pub fn new(name: impl ToString, buf: T) -> Self {
-        let inner = Arc::new(Mutex::new(ProgressInner {
+    pub fn new(name: impl ToString, tx: Sender<Item>, buf: T) -> Self {
+        let inner = ProgressInner {
             name: name.to_string(),
             total: 0,
             size: 0,
             canceled: false,
             buf,
-        }));
-        Progress { inner }
-    }
-
-    pub async fn to_item(&self, id: impl ToString) -> Item {
-        let pg = self.inner.lock().await;
-        Item {
-            id: id.to_string(),
-            name: pg.name.clone(),
-            total: pg.total,
-            size: pg.size,
-            canceled: pg.canceled,
-        }
+        };
+        Progress { inner, tx }
     }
 }
 
 impl<T: AsyncRead + Unpin + Send> AsyncRead for Progress<T> {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context,
-        buf: &mut [u8]
+        buf: &mut [u8],
     ) -> Poll<Result<usize>> {
-        match self.inner.lock().boxed().as_mut().poll(cx) {
-            Poll::Ready(mut s) => {
-                Pin::new(&mut s.buf).poll_read(cx, buf)
-            },
-            Poll::Pending => {
-                Poll::Pending
-            }
-        }
+        Pin::new(&mut self.inner.buf).poll_read(cx, buf)
     }
 }
 
 impl<T: AsyncWrite + Unpin + Send> AsyncWrite for Progress<T> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &[u8]
-    ) -> Poll<Result<usize>> {
-        match self.inner.lock().boxed().as_mut().poll(cx) {
-            Poll::Ready(mut s) => {
-                if s.canceled {
-                    Poll::Ready(Err(io::Error::new(ErrorKind::Interrupted, "canceled")))
-                } else {
-                    let poll = Pin::new(&mut s.buf).poll_write(cx, buf);
-                    if let Poll::Ready(Ok(n)) = poll {
-                        s.size += n as u64;
-                    }
-                    println!("{}", s.size);
-                    poll
-                }
-            },
-            Poll::Pending => {
-                Poll::Pending
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context, buf: &[u8]) -> Poll<Result<usize>> {
+        if self.inner.canceled {
+            Poll::Ready(Err(io::Error::new(ErrorKind::Interrupted, "canceled")))
+        } else {
+            let poll = Pin::new(&mut self.inner.buf).poll_write(cx, buf);
+            if let Poll::Ready(Ok(n)) = poll {
+                self.inner.size += n as u64;
+                let _ = self.tx.broadcast(Item {
+                    name: self.inner.name.clone(),
+                    total: self.inner.total,
+                    size: self.inner.size,
+                    canceled: self.inner.canceled,
+                });
             }
+            println!("{}", self.inner.size);
+            poll
         }
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context
-    ) -> Poll<Result<()>> {
-        match self.inner.lock().boxed().as_mut().poll(cx) {
-            Poll::Ready(mut s) => {
-                Pin::new(&mut s.buf).poll_flush(cx)
-            },
-            Poll::Pending => {
-                Poll::Pending
-            }
-        }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<()>> {
+        Pin::new(&mut self.inner.buf).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context
-    ) -> Poll<Result<()>> {
-        match self.inner.lock().boxed().as_mut().poll(cx) {
-            Poll::Ready(mut s) => {
-                Pin::new(&mut s.buf).poll_shutdown(cx)
-            },
-            Poll::Pending => {
-                Poll::Pending
-            }
-        }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<()>> {
+        Pin::new(&mut self.inner.buf).poll_shutdown(cx)
     }
 }
 
 impl<T: AsyncSeek + Unpin + Send> AsyncSeek for Progress<T> {
     fn start_seek(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context,
-        position: SeekFrom
+        position: SeekFrom,
     ) -> Poll<Result<()>> {
-        match self.inner.lock().boxed().as_mut().poll(cx) {
-            Poll::Ready(mut s) => {
-                Pin::new(&mut s.buf).start_seek(cx, position)
-            },
-            Poll::Pending => {
-                Poll::Pending
-            }
-        }
+        Pin::new(&mut self.inner.buf).start_seek(cx, position)
     }
 
-    fn poll_complete(
-        self: Pin<&mut Self>,
-        cx: &mut Context
-    ) -> Poll<Result<u64>> {
-        match self.inner.lock().boxed().as_mut().poll(cx) {
-            Poll::Ready(mut s) => {
-                Pin::new(&mut s.buf).poll_complete(cx)
-            },
-            Poll::Pending => {
-                Poll::Pending
-            }
-        }
+    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<u64>> {
+        Pin::new(&mut self.inner.buf).poll_complete(cx)
     }
 }
