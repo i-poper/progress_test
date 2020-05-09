@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncSeek, ErrorKind, Result};
 use tokio::prelude::*;
-use tokio::sync::watch::Sender;
+use tokio::sync::watch::{Sender, Receiver};
 
 use crate::item::Item;
 
@@ -12,7 +12,6 @@ struct ProgressInner<T> {
     name: String,
     total: u64,
     size: u64,
-    canceled: bool,
     buf: T,
 }
 
@@ -22,7 +21,6 @@ impl<T> fmt::Debug for ProgressInner<T> {
             .field("name", &self.name)
             .field("total", &self.total)
             .field("size", &self.size)
-            .field("canceled", &self.canceled)
             .finish()
     }
 }
@@ -30,18 +28,27 @@ impl<T> fmt::Debug for ProgressInner<T> {
 pub struct Progress<T> {
     inner: ProgressInner<T>,
     tx: Sender<Item>,
+    rx: Receiver<bool>,
 }
 
 impl<T> Progress<T> {
-    pub fn new(name: impl ToString, tx: Sender<Item>, buf: T) -> Self {
+    pub fn new(name: impl ToString, tx: Sender<Item>, rx: Receiver<bool>, buf: T) -> Self {
         let inner = ProgressInner {
             name: name.to_string(),
             total: 0,
             size: 0,
-            canceled: false,
             buf,
         };
-        Progress { inner, tx }
+        Progress { inner, tx, rx }
+    }
+
+    fn to_item(&self, canceled: bool ) -> Item {
+        Item {
+            name: self.inner.name.clone(),
+            total: self.inner.total,
+            size: self.inner.size,
+            canceled,
+        }
     }
 }
 
@@ -57,18 +64,15 @@ impl<T: AsyncRead + Unpin + Send> AsyncRead for Progress<T> {
 
 impl<T: AsyncWrite + Unpin + Send> AsyncWrite for Progress<T> {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context, buf: &[u8]) -> Poll<Result<usize>> {
-        if self.inner.canceled {
+        let canceled = *self.rx.borrow();
+        if canceled {
+            let _ = self.tx.broadcast(self.to_item(canceled));
             Poll::Ready(Err(io::Error::new(ErrorKind::Interrupted, "canceled")))
         } else {
             let poll = Pin::new(&mut self.inner.buf).poll_write(cx, buf);
             if let Poll::Ready(Ok(n)) = poll {
                 self.inner.size += n as u64;
-                let _ = self.tx.broadcast(Item {
-                    name: self.inner.name.clone(),
-                    total: self.inner.total,
-                    size: self.inner.size,
-                    canceled: self.inner.canceled,
-                });
+                let _ = self.tx.broadcast(self.to_item(canceled));
             }
             println!("{}", self.inner.size);
             poll

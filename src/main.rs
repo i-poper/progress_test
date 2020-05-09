@@ -12,7 +12,8 @@ use crate::item::Item;
 #[tokio::main]
 async fn main() {
     let (tx, mut rx) = channel(Item::default());
-    let pg = Progress::new("test", tx, io::sink());
+    let (cancel_tx, cancel_rx)  = channel(false);
+    let pg = Progress::new("test", tx, cancel_rx, io::sink());
 
     let download_handle = tokio::task::spawn(async move {
         let url = "https://releases.ubuntu.com/20.04/ubuntu-20.04-desktop-amd64.iso";
@@ -33,6 +34,12 @@ async fn main() {
             println!("{:?}", stat);
             tokio::time::delay_for(std::time::Duration::from_millis(100)).await;
         }
+        println!("{:?}", rx.borrow());
+    });
+
+    tokio::task::spawn(async move {
+        tokio::time::delay_for(std::time::Duration::from_millis(60*1000)).await;
+        let _ = cancel_tx.broadcast(true);
     });
 
     download_handle.await.unwrap();
